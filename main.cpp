@@ -5,6 +5,10 @@
 #include <iostream>
 #include <cmath>
 #include <limits>
+#include <concepts>
+#include <sstream>
+#include <sys/wait.h>
+#include <cppgfplots.h>
 
 
 
@@ -28,7 +32,121 @@ struct linear_system {
             printf("\n");
         }
     }
+
 };
+
+
+enum class linear_system_op { NONE = 0, ADD, SUB, DIV, MUL, };
+
+enum class linear_system_op_kind { COLUMN, ROW };
+
+template <size_t nrows, size_t ncols, typename element_type>
+class linear_system_viz {
+public:
+    linear_system_viz(linear_system<nrows, ncols> system):
+        underlying_system_(system), current_operation_(linear_system_op::NONE) {};
+
+    std::string latex() {
+        std::stringstream ss;
+        ss << R"(\adjustbox{stack=cc}{\rule{0pt}{1ex}\\\( )" "\n";
+
+        ss << R"(\begin{pNiceArray}[extra-left-margin=.5em, )"
+              R"(extra-right-margin=.5em, create-medium-nodes]{)";
+
+        for (size_t i = 0; i < ncols; ++ i)
+            ss << R"(r)";
+
+        ss << R"(@{\hskip 1em}|r})" "\n";
+
+        for (size_t i = 0; i < nrows; ++ i) {
+            ss << underlying_system_.matrix[i][0] << " ";
+            for (size_t j = 1; j < ncols; ++ j)
+                ss << "& " << underlying_system_.matrix[i][j] << " ";
+
+            ss << "& " << underlying_system_.free_term[i] << " ";
+
+            ss << R"(\\)" "\n";
+        }
+
+        ss << R"(\end{pNiceArray} \mkern1mu)";
+
+        ss << R"(\) \\ \rule{0pt}{1ex}})";
+        return ss.str();
+    }
+
+private:
+    linear_system<nrows, ncols, element_type> underlying_system_;
+
+    linear_system_op current_operation_ = linear_system_op::NONE;
+
+    double coefficient_ = 0.0;
+    linear_system_op_kind operation_kind_ = linear_system_op_kind::ROW;
+
+    int main_index = 0, target_index = 0;
+};
+
+
+
+template <size_t nrows, size_t ncols, typename element_type>
+class linear_system_transform_path {
+public:
+    std::vector<linear_system_viz<nrows, ncols, element_type>> transforms_;
+
+    void generate_report(std::string output_file_name) {
+        std::filesystem::path path = output_file_name;
+        if (!path.parent_path().empty() && !std::filesystem::exists(path.parent_path()))
+            execute("mkdir", ".", path.parent_path().c_str());
+
+        char temp_directory_name[] = "/tmp/linear-system-visualization-XXXXXX";
+        mkdtemp(temp_directory_name);
+
+        std::string image_tex = temp_directory_name;
+        image_tex += "/standalone-image.tex";
+
+        FILE *image_tex_stream = fopen(image_tex.c_str(), "w");
+        fprintf(image_tex_stream, 
+            "\\documentclass[a1paper,12pt]{extarticle}"                                 "\n"
+                                                                                        "\n"
+            "\\tolerance=10000"                                                         "\n"
+                                                                                        "\n"
+            "\\usepackage[left=3cm,right=3cm,top=1cm,bottom=1cm]{geometry}"             "\n"
+                                                                                        "\n"
+            "\\usepackage{nicematrix}"                                                  "\n"
+            "\\usepackage{adjustbox}"                                                   "\n"
+                                                                                        "\n"
+            "\\usepackage{tikz}"                                                        "\n"
+            "\\usetikzlibrary{fit,shapes.geometric}"                                    "\n"
+                                                                                        "\n"
+            "\\linespread{1.4}"                                                         "\n"
+                                                                                        "\n"
+            "\\begin{document}"                                                         "\n"
+            "\\setlength\\arrayrulewidth{0.6pt}"                                        "\n"
+                                                                                        "\n"
+        );
+
+        for (size_t i = 0; i < transforms_.size(); ++i) {
+            fprintf(image_tex_stream, "%s\n", transforms_[i].latex().c_str());
+            if (i != transforms_.size() - 1)
+                fprintf(image_tex_stream, "\\(\\sim\\)\n");
+        }
+
+        fprintf(image_tex_stream,
+                "\\end{document}"                                                       "\n"
+        );
+
+        fclose(image_tex_stream), image_tex_stream = NULL;
+
+        execute("latexmk", temp_directory_name, "-pdf",
+                "-pdflatex=pdflatex -interaction=nonstopmode %O %S", image_tex.c_str());
+
+        std::string image_pdf = temp_directory_name;
+        image_pdf += "/standalone-image.pdf";
+
+        execute("mv", ".", image_pdf.c_str(), output_file_name.c_str());
+    }        
+};
+
+
 
 
 enum class linear_system_solution_status {
@@ -36,7 +154,6 @@ enum class linear_system_solution_status {
     INFINITE_SOLUTIONS = -1,
     SINGLE_SOLUTION    =  1
 };
-
 
 template <size_t size, typename element_type>
 struct linear_system_solution {
@@ -74,7 +191,8 @@ bool is_zero(double a, double epsilon = std::numeric_limits<double>::epsilon()) 
 
 
 template <size_t nrows, size_t ncols, typename element_type>
-auto solve_linear_system_gauss(linear_system<nrows, ncols, element_type> &system)
+auto solve_linear_system_gauss_impl(linear_system<nrows, ncols, element_type> &system,
+                                    auto &&report_matrix_transformation)
     -> linear_system_solution<ncols, element_type> {
 
     static_assert(nrows == ncols, "For now it only works for nxn matrices");
@@ -101,6 +219,8 @@ auto solve_linear_system_gauss(linear_system<nrows, ncols, element_type> &system
 
     //                           vvv last row has no one to substract from!
     for (size_t i = 0; i < nrows - 1; ++ i) {
+        report_matrix_transformation({ system });
+
         // Find element with max abs in the current matrix's row:
         int max_column_index = 0;
         auto max_abs = fabs(system.matrix[i][last_substracted_column]);
@@ -167,6 +287,8 @@ auto solve_linear_system_gauss(linear_system<nrows, ncols, element_type> &system
 
     // Reversed step (getting solution from upper-triangular matrix):
     for (int i = nrows - 1; i >= 0; -- i) {
+        report_matrix_transformation({ system });
+
         // Divide current row by it's a coefficient:
         auto current_a_coefficient = system.matrix[i][i];
         //                                           ^^^
@@ -199,6 +321,8 @@ auto solve_linear_system_gauss(linear_system<nrows, ncols, element_type> &system
         }
     }
 
+    report_matrix_transformation({ system });
+
     // Last step (get back solution in correct order):
     linear_system_solution<ncols, element_type> result = {
         linear_system_solution_status::SINGLE_SOLUTION
@@ -217,12 +341,10 @@ auto solve_linear_system_gauss(linear_system<nrows, ncols, element_type> &system
 
             row_sum -= original_system.free_term[i];
 
-            // TODO: This epsilon should be chosen with Gauss-method in mind:
-            const auto EPSILON =
-                row_sum * std::numeric_limits<decltype(row_sum)>::epsilon();
-
+            // TODO: This epsilon should be chosen with Gauss-method in mind
+            //       (now It's just a trial-and-error-selected arbitrary value):
             // Check if substitution on current row succeded:
-            if (fabs(row_sum) <= EPSILON)
+            if (fabs(row_sum) >= 1e-5)
                 return false;
         }
 
@@ -232,23 +354,43 @@ auto solve_linear_system_gauss(linear_system<nrows, ncols, element_type> &system
     return result;
 }
 
+template <size_t nrows, size_t ncols, typename element_type>
+decltype(auto) solve_linear_system_gauss(linear_system<nrows, ncols, element_type> &system) {
+    return solve_linear_system_gauss_impl(system,
+            []([[maybe_unused]] linear_system_viz<nrows, ncols, element_type> viz){}
+    );
+}
+
+template <size_t nrows, size_t ncols, typename element_type>
+auto solve_linear_system_gauss(linear_system<nrows, ncols, element_type> &system,
+                                         std::string output_file_name) {
+
+    linear_system_transform_path<nrows, ncols, element_type> path {};
+    auto result = solve_linear_system_gauss_impl(system,
+            [&](linear_system_viz<nrows, ncols, element_type> viz){
+                path.transforms_.emplace_back(std::move(viz));
+            }
+    );
+
+    path.generate_report(output_file_name);
+
+    return result;
+}
+
 
 
 int main() {
-    linear_system<3, 3> system = {
-        .matrix = {
-            { 3, 2, -1 },
-            { 2, -2, 4 },
-            { -1, 0.5, -1 }
-        },
+    linear_system<7, 7> system = {};
+    for (size_t i = 0; i < 7; ++ i) {
+        for (size_t j = 0; j < 7; ++ j)
+            system.matrix[i][j] = rand() + rand() / (double)INT_MAX;
 
-        .free_term = { 1, -2, 0 }
-    };
+        system.free_term[i] = rand() + rand() / (double)INT_MAX;
+    }
 
-    system.print();
+    std::cout << "\nSolution: ";
+    std::cout.flush();
 
-    printf("\nSolution: ");
-
-    auto result = solve_linear_system_gauss(system);
+    auto result = solve_linear_system_gauss(system, "gauss-report.pdf");
     result.print();
 }
