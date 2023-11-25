@@ -48,33 +48,75 @@ public:
 
     std::string latex() {
         std::stringstream ss;
-        ss << R"(\adjustbox{stack=cc}{\rule{0pt}{1ex}\\\( )" "\n";
+        ss << "\\adjustbox{stack=cc}{\\rule{0pt}{1ex}\\\\ \\(\n";
 
-        ss << R"(\begin{pNiceArray}[extra-left-margin=.5em, )"
-              R"(extra-right-margin=.5em, create-medium-nodes]{)";
+        ss << "\\begin{pNiceArray}[create-medium-nodes, ";
+        if (main_index != 0 && target_index != 0)
+            ss << "last-col, ";
+        ss << "extra-left-margin=.5em, extra-right-margin=.5em]{";
 
         for (size_t i = 0; i < ncols; ++ i)
             ss << R"(r)";
 
-        ss << R"(@{\hskip 1em}|r})" "\n";
+        ss << "@{\\hskip 1em}|r}\n";
 
         for (size_t i = 0; i < nrows; ++ i) {
             ss << underlying_system_.matrix[i][0] << " ";
             for (size_t j = 1; j < ncols; ++ j)
-                ss << "& " << underlying_system_.matrix[i][j] << " ";
+                ss << "& " << std::setprecision(2) << underlying_system_.matrix[i][j] << " ";
 
-            ss << "& " << underlying_system_.free_term[i] << " ";
+            ss << "& " << std::setprecision(2) << underlying_system_.free_term[i] << " ";
 
-            ss << R"(\\)" "\n";
+            if (main_index != 0 && target_index != 0) {
+                if (main_index == (int) i + 1)
+                    ss << "& \\texttt{+} ";
+                else
+                    ss << "& ";
+            }
+
+            ss << "\\\\\n";
         }
 
-        ss << R"(\end{pNiceArray} \mkern1mu)";
+        if (main_index != 0 && target_index != 0) {
+            glm::ivec2 sel0[] = {
+                { main_index,           1 },
+                { main_index,   ncols + 1 }
+            };
 
-        ss << R"(\) \\ \rule{0pt}{1ex}})";
+            glm::ivec2 sel1[] = {
+                { target_index,         1 },
+                { target_index, ncols + 1 }
+            };
+
+            ss << "\\CodeAfter\n";
+
+            ss << "\\tikz \\node [rectangle, draw=black, fit=";
+            ss << "(" << sel0[0].x << "-" << sel0[0].y << "-medium)";
+            ss << " ";
+            ss << "(" << sel0[1].x << "-" << sel0[1].y << "-medium)";
+            ss << "] {};\n";
+
+            ss << "\\tikz \\node [rectangle, draw=black, fit=";
+            ss << "(" << sel1[0].x << "-" << sel1[0].y << "-medium)";
+            ss << " ";
+            ss << "(" << sel1[1].x << "-" << sel1[1].y << "-medium)";
+            ss << "] {};\n";
+
+            ss << "\\tikz \\node [at=";
+            ss << "(" << target_index << ".5-|" << (ncols + 2) << ")";
+            ss << ", right=1em] (target-row) {};\n";
+
+            ss << "\\tikz \\path [thick, ->] ";
+            ss << "(" << main_index <<      "-" << (ncols + 2) << "-medium)";
+            ss << " edge[bend left] (target-row);\n";
+        }
+
+        ss << "\\end{pNiceArray} \\mkern1mu";
+        ss << "\\) \\\\ \\rule{0pt}{1ex}}";
+
         return ss.str();
     }
 
-private:
     linear_system<nrows, ncols, element_type> underlying_system_;
 
     linear_system_op current_operation_ = linear_system_op::NONE;
@@ -219,7 +261,7 @@ auto solve_linear_system_gauss_impl(linear_system<nrows, ncols, element_type> &s
 
     //                           vvv last row has no one to substract from!
     for (size_t i = 0; i < nrows - 1; ++ i) {
-        report_matrix_transformation({ system });
+        // report_matrix_transformation({ system });
 
         // Find element with max abs in the current matrix's row:
         int max_column_index = 0;
@@ -263,6 +305,12 @@ auto solve_linear_system_gauss_impl(linear_system<nrows, ncols, element_type> &s
         // Gauss-elimination, substract our element
         for (size_t row_index = i + 1; row_index < nrows; ++ row_index) {
             //                    ^^^ start substracting from the next row
+
+            linear_system_viz<nrows, ncols, element_type> current_viz{system};
+            current_viz.  main_index =         i + 1;
+            current_viz.target_index = row_index + 1;
+
+            report_matrix_transformation(current_viz);
 
             auto coeff = system.matrix[row_index][last_substracted_column]
                             / system.matrix[i][last_substracted_column];
@@ -380,9 +428,9 @@ auto solve_linear_system_gauss(linear_system<nrows, ncols, element_type> &system
 
 
 int main() {
-    linear_system<7, 7> system = {};
-    for (size_t i = 0; i < 7; ++ i) {
-        for (size_t j = 0; j < 7; ++ j)
+    linear_system<5, 5> system = {};
+    for (size_t i = 0; i < 5; ++ i) {
+        for (size_t j = 0; j < 5; ++ j)
             system.matrix[i][j] = rand() + rand() / (double)INT_MAX;
 
         system.free_term[i] = rand() + rand() / (double)INT_MAX;
