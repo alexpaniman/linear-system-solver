@@ -36,7 +36,7 @@ struct linear_system {
 };
 
 
-enum class linear_system_op { NONE = 0, ADD, SUB, DIV, MUL, };
+enum class linear_system_op { NONE = 0, MULTIPLIED_SUBSTRACT, COLUMN_SWAP, ROW_DIVIDE };
 
 enum class linear_system_op_kind { COLUMN, ROW };
 
@@ -51,14 +51,20 @@ public:
         ss << "\\adjustbox{stack=cc}{\\rule{0pt}{1ex}\\\\ \\(\n";
 
         ss << "\\begin{pNiceArray}[create-medium-nodes, ";
-        if (main_index != 0 && target_index != 0)
+        if (current_operation_ == linear_system_op::MULTIPLIED_SUBSTRACT
+            || current_operation_ == linear_system_op::ROW_DIVIDE)
             ss << "last-col, ";
+
+        if (current_operation_ == linear_system_op::COLUMN_SWAP) // TODO: !
+            ss << "first-row, ";
+
         ss << "extra-left-margin=.5em, extra-right-margin=.5em]{";
 
         for (size_t i = 0; i < ncols; ++ i)
             ss << R"(r)";
 
         ss << "@{\\hskip 1em}|r}\n";
+
 
         for (size_t i = 0; i < nrows; ++ i) {
             ss << underlying_system_.matrix[i][0] << " ";
@@ -67,17 +73,27 @@ public:
 
             ss << "& " << std::setprecision(2) << underlying_system_.free_term[i] << " ";
 
-            if (main_index != 0 && target_index != 0) {
-                if (main_index == (int) i + 1)
-                    ss << "& \\texttt{+} ";
-                else
+            if (current_operation_ == linear_system_op::MULTIPLIED_SUBSTRACT
+                || current_operation_ == linear_system_op::ROW_DIVIDE) {
+
+                if (main_index != (int) i + 1)
                     ss << "& ";
+                else {
+                    if (current_operation_ == linear_system_op::MULTIPLIED_SUBSTRACT) 
+                        ss << "& - (\\cdot " << coefficient_ << ")";
+
+                    if (current_operation_ == linear_system_op::ROW_DIVIDE)
+                        ss << " & \\div " << coefficient_;
+                }
             }
+
 
             ss << "\\\\\n";
         }
 
-        if (main_index != 0 && target_index != 0) {
+        if (current_operation_ == linear_system_op::MULTIPLIED_SUBSTRACT ||
+            current_operation_ == linear_system_op::ROW_DIVIDE) {
+
             glm::ivec2 sel0[] = {
                 { main_index,           1 },
                 { main_index,   ncols + 1 }
@@ -96,19 +112,21 @@ public:
             ss << "(" << sel0[1].x << "-" << sel0[1].y << "-medium)";
             ss << "] {};\n";
 
-            ss << "\\tikz \\node [rectangle, draw=black, fit=";
-            ss << "(" << sel1[0].x << "-" << sel1[0].y << "-medium)";
-            ss << " ";
-            ss << "(" << sel1[1].x << "-" << sel1[1].y << "-medium)";
-            ss << "] {};\n";
+            if (current_operation_ == linear_system_op::MULTIPLIED_SUBSTRACT) {
+                ss << "\\tikz \\node [rectangle, draw=black, fit=";
+                ss << "(" << sel1[0].x << "-" << sel1[0].y << "-medium)";
+                ss << " ";
+                ss << "(" << sel1[1].x << "-" << sel1[1].y << "-medium)";
+                ss << "] {};\n";
 
-            ss << "\\tikz \\node [at=";
-            ss << "(" << target_index << ".5-|" << (ncols + 2) << ")";
-            ss << ", right=1em] (target-row) {};\n";
+                ss << "\\tikz \\node [at=";
+                ss << "(" << target_index << ".5-|" << (ncols + 2) << ")";
+                ss << ", right=1em] (target-row) {};\n";
 
-            ss << "\\tikz \\path [thick, ->] ";
-            ss << "(" << main_index <<      "-" << (ncols + 2) << "-medium)";
-            ss << " edge[bend left] (target-row);\n";
+                ss << "\\tikz \\path [thick, ->] ";
+                ss << "(" << main_index <<      "-" << (ncols + 2) << "-medium)";
+                ss << " edge[bend left] (target-row);\n";
+            }
         }
 
         ss << "\\end{pNiceArray} \\mkern1mu";
@@ -166,10 +184,11 @@ public:
                                                                                         "\n"
         );
 
+        fprintf(image_tex_stream, "\\noindent");
         for (size_t i = 0; i < transforms_.size(); ++i) {
-            fprintf(image_tex_stream, "%s\n", transforms_[i].latex().c_str());
+            fprintf(image_tex_stream, "%s", transforms_[i].latex().c_str());
             if (i != transforms_.size() - 1)
-                fprintf(image_tex_stream, "\\(\\sim\\)\n");
+                fprintf(image_tex_stream, "~\\(\\sim\\)\n");
         }
 
         fprintf(image_tex_stream,
@@ -259,8 +278,7 @@ auto solve_linear_system_gauss_impl(linear_system<nrows, ncols, element_type> &s
     // Direct step (we will end up with upper-triangular matrix after it)
     int last_substracted_column = 0;
 
-    //                           vvv last row has no one to substract from!
-    for (size_t i = 0; i < nrows - 1; ++ i) {
+    for (size_t i = 0; i < nrows; ++ i) {
         // report_matrix_transformation({ system });
 
         // Find element with max abs in the current matrix's row:
@@ -302,18 +320,32 @@ auto solve_linear_system_gauss_impl(linear_system<nrows, ncols, element_type> &s
             }
         }
 
+        linear_system_viz<nrows, ncols, element_type> current_viz{system};
+        current_viz.current_operation_ = linear_system_op::ROW_DIVIDE;
+        current_viz.  main_index = last_substracted_column + 1;
+        current_viz.coefficient_ = system.matrix[i][last_substracted_column];
+        report_matrix_transformation(current_viz);
+
+        // Normalize current row:
+        for (size_t j = last_substracted_column + 1; j < ncols; ++ j)
+            system.matrix[i][j] /= system.matrix[i][last_substracted_column];
+
+        system.free_term[i] /= system.matrix[i][last_substracted_column];
+        system.matrix[i][last_substracted_column] = 1.0;
+
         // Gauss-elimination, substract our element
         for (size_t row_index = i + 1; row_index < nrows; ++ row_index) {
             //                    ^^^ start substracting from the next row
 
+            auto coeff = system.matrix[row_index][last_substracted_column];
+
             linear_system_viz<nrows, ncols, element_type> current_viz{system};
+            current_viz.current_operation_ = linear_system_op::MULTIPLIED_SUBSTRACT;
             current_viz.  main_index =         i + 1;
             current_viz.target_index = row_index + 1;
+            current_viz.coefficient_ = coeff;
 
             report_matrix_transformation(current_viz);
-
-            auto coeff = system.matrix[row_index][last_substracted_column]
-                            / system.matrix[i][last_substracted_column];
 
             // This one is eliminated, no need for calculations (this, also,
             // has the benefit of getting an exact zero, not an approximation):
@@ -335,7 +367,7 @@ auto solve_linear_system_gauss_impl(linear_system<nrows, ncols, element_type> &s
 
     // Reversed step (getting solution from upper-triangular matrix):
     for (int i = nrows - 1; i >= 0; -- i) {
-        report_matrix_transformation({ system });
+        // report_matrix_transformation({ system });
 
         // Divide current row by it's a coefficient:
         auto current_a_coefficient = system.matrix[i][i];
@@ -358,9 +390,6 @@ auto solve_linear_system_gauss_impl(linear_system<nrows, ncols, element_type> &s
             return num_non_zero_elements == 1;
         }() && "At each reverse step only one element should be non-zero!");
 
-        system.matrix[i][i] = 1.0;
-        system.free_term[i] /= current_a_coefficient;
-
         for (int row_index = i - 1; row_index >= 0; -- row_index) {
             system.free_term[row_index] -=
                 system.matrix[row_index][i] * system.free_term[i];
@@ -369,7 +398,7 @@ auto solve_linear_system_gauss_impl(linear_system<nrows, ncols, element_type> &s
         }
     }
 
-    report_matrix_transformation({ system });
+    // report_matrix_transformation({ system });
 
     // Last step (get back solution in correct order):
     linear_system_solution<ncols, element_type> result = {
@@ -392,7 +421,7 @@ auto solve_linear_system_gauss_impl(linear_system<nrows, ncols, element_type> &s
             // TODO: This epsilon should be chosen with Gauss-method in mind
             //       (now It's just a trial-and-error-selected arbitrary value):
             // Check if substitution on current row succeded:
-            if (fabs(row_sum) >= 1e-5)
+            if (fabs(row_sum) >= 1e-1)
                 return false;
         }
 
